@@ -12,7 +12,9 @@ import {
   Container,
   useMediaQuery,
   useTheme,
-  CircularProgress
+  CircularProgress,
+  Avatar,
+  Divider
 } from '@mui/material';
 import { 
   Build as BuildIcon, 
@@ -22,7 +24,8 @@ import {
   Warning as WarningIcon,
   Logout as LogoutIcon,
   Refresh as RefreshIcon,
-  People as PeopleIcon
+  People as PeopleIcon,
+  Person as PersonIcon
 } from '@mui/icons-material';
 import { getAuth, signOut } from 'firebase/auth';
 import { getFirestore, collection, query, where, getDocs, orderBy, limit } from 'firebase/firestore';
@@ -48,6 +51,7 @@ const Home = ({ userRole, userData, onLogout, onNavigateToTab }) => {
   const [recentActivities, setRecentActivities] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [mecanicosAcciones, setMecanicosAcciones] = useState([]);
   
   // Responsive design hooks
   const theme = useTheme();
@@ -87,23 +91,66 @@ const Home = ({ userRole, userData, onLogout, onNavigateToTab }) => {
         try {
           // Contar mantenciones pendientes de la colección mantenimientos
           const mantencionesRef = collection(firestore, 'mantenimientos');
-          const mantencionesQuery = query(
-            mantencionesRef, 
-            where('estado', 'in', ['pendiente', 'en_proceso'])
-          );
+          
+          // Consulta base para mantenciones
+          let mantencionesQuery;
+          
+          if (userRole === 'mecanico') {
+            // Si es mecánico, solo ver sus propias mantenciones
+            mantencionesQuery = query(
+              mantencionesRef, 
+              where('estado', 'in', ['pendiente', 'en_proceso']),
+              where('responsable', '==', userData.id || userData.uid)
+            );
+          } else {
+            // Si es admin, ver todas
+            mantencionesQuery = query(
+              mantencionesRef, 
+              where('estado', 'in', ['pendiente', 'en_proceso'])
+            );
+          }
+          
           const mantencionesSnapshot = await getDocs(mantencionesQuery);
           mantencionesPendientes = mantencionesSnapshot.size;
           
           // NUEVO: Contar también las fallas con estado pendiente
           const fallasRef = collection(firestore, 'fallas');
-          const fallasQuery = query(
-            fallasRef,
-            where('estado', '==', 'pendiente')
-          );
+          
+          // Consulta base para fallas
+          let fallasQuery;
+          
+          if (userRole === 'mecanico') {
+            // Si es mecánico, solo ver fallas asignadas a él
+            fallasQuery = query(
+              fallasRef,
+              where('estado', '==', 'pendiente'),
+              where('responsable', '==', userData.id || userData.uid)
+            );
+          } else {
+            // Si es admin, ver todas
+            fallasQuery = query(
+              fallasRef,
+              where('estado', '==', 'pendiente')
+            );
+          }
+          
           const fallasSnapshot = await getDocs(fallasQuery);
+          
           // También contar fallas que tengan estado pendiente en su último historial
           const fallasConHistorialPendiente = [];
-          const todasLasFallasQuery = query(fallasRef);
+          
+          // Consulta para todas las fallas (con filtro por responsable si es mecánico)
+          let todasLasFallasQuery;
+          
+          if (userRole === 'mecanico') {
+            todasLasFallasQuery = query(
+              fallasRef,
+              where('responsable', '==', userData.id || userData.uid)
+            );
+          } else {
+            todasLasFallasQuery = query(fallasRef);
+          }
+          
           const todasLasFallasSnapshot = await getDocs(todasLasFallasQuery);
           
           todasLasFallasSnapshot.docs.forEach(doc => {
@@ -125,13 +172,58 @@ const Home = ({ userRole, userData, onLogout, onNavigateToTab }) => {
           
           mantencionesPendientes += fallasIds.size;
           
-          // Get recent activities
-          const recentMaintenanceQuery = query(
-            mantencionesRef,
-            orderBy('fechaActualizacion', 'desc'),
-            limit(3)
-          );
+          // Get recent activities - filtrar por responsable si es mecánico
+          let recentMaintenanceQuery;
+          
+          if (userRole === 'mecanico') {
+            recentMaintenanceQuery = query(
+              mantencionesRef,
+              where('responsable', '==', userData.id || userData.uid),
+              orderBy('fechaActualizacion', 'desc'),
+              limit(3)
+            );
+          } else {
+            recentMaintenanceQuery = query(
+              mantencionesRef,
+              orderBy('fechaActualizacion', 'desc'),
+              limit(5)
+            );
+          }
+          
           const recentMaintenanceSnap = await getDocs(recentMaintenanceQuery);
+          
+          // Si es admin, necesitamos obtener los nombres de los responsables
+          let responsablesData = {};
+          
+          if (userRole === 'admin') {
+            // Obtener una lista de todos los IDs de responsables en las mantenciones recientes
+            const responsableIds = new Set();
+            recentMaintenanceSnap.docs.forEach(doc => {
+              const mant = doc.data();
+              if (mant.responsable) {
+                responsableIds.add(mant.responsable);
+              }
+            });
+            
+            // Obtener información de los usuarios correspondientes
+            if (responsableIds.size > 0) {
+              const usuariosRef = collection(firestore, 'usuarios');
+              for (const responsableId of responsableIds) {
+                try {
+                  const usuarioDoc = await getDocs(query(usuariosRef, where('__name__', '==', responsableId)));
+                  if (!usuarioDoc.empty) {
+                    const userData = usuarioDoc.docs[0].data();
+                    responsablesData[responsableId] = {
+                      nombre: userData.nombre || 'Usuario',
+                      correo: userData.correo || 'sin correo'
+                    };
+                  }
+                } catch (error) {
+                  console.error("Error al obtener datos de usuario:", error);
+                }
+              }
+            }
+          }
           
           const maintenanceActivities = recentMaintenanceSnap.docs.map(doc => {
             const mant = doc.data();
@@ -141,11 +233,137 @@ const Home = ({ userRole, userData, onLogout, onNavigateToTab }) => {
               title: `Mantenimiento ${mant.tipo === 'preventivo' ? 'Preventivo' : 'Correctivo'}`,
               description: `${mant.equipo} - ${mant.descripcion?.substring(0, 60)}${mant.descripcion?.length > 60 ? '...' : ''}`,
               date: mant.fechaActualizacion?.toDate() || new Date(),
-              estado: mant.estado
+              estado: mant.estado,
+              responsable: mant.responsable || 'No asignado',
+              responsableNombre: (userRole === 'admin' && mant.responsable && responsablesData[mant.responsable]) 
+                                 ? responsablesData[mant.responsable].nombre : null,
+              // Priorizar el campo mecanico, si existe, sobre el responsable
+              responsableCorreo: (userRole === 'admin') 
+                                 ? (mant.mecanico || 
+                                   ((mant.responsable && responsablesData[mant.responsable]) 
+                                     ? responsablesData[mant.responsable].correo 
+                                     : 'No asignado'))
+                                 : null
             };
           });
           
           setRecentActivities(maintenanceActivities);
+          
+          // Si es admin, cargar todas las mantenciones y fallas de todos los mecánicos
+          if (userRole === 'admin') {
+            try {
+              // Obtener usuarios mecánicos
+              const usuariosRef = collection(firestore, 'usuarios');
+              const mecanicosQuery = query(
+                usuariosRef,
+                where('rol', '==', 'mecanico')
+              );
+              const mecanicosSnapshot = await getDocs(mecanicosQuery);
+              
+              // Crear un mapa de IDs de mecánicos a sus nombres para referenciar después
+              const mecanicoNamesMap = {};
+              mecanicosSnapshot.docs.forEach(doc => {
+                const data = doc.data();
+                mecanicoNamesMap[doc.id] = data.nombre || data.correo || 'Mecánico';
+              });
+              
+              // Obtener todas las mantenciones recientes sin filtrar por mecánico específico
+              const allMaintenanceQuery = query(
+                mantencionesRef,
+                orderBy('fechaActualizacion', 'desc'),
+                limit(15) // Obtener un número mayor para tener suficientes para mostrar
+              );
+              
+              const allMaintenanceSnap = await getDocs(allMaintenanceQuery);
+              
+              // Mapa para agrupar actividades por mecánico
+              const mecanicosActividadesMap = {};
+              
+              // Procesar cada mantenimiento y asignarlo al mecánico responsable
+              allMaintenanceSnap.docs.forEach(doc => {
+                const mant = doc.data();
+                const responsableId = mant.responsable;
+                
+                // Solo incluir si tiene un responsable asignado
+                if (responsableId && mecanicoNamesMap[responsableId]) {
+                  if (!mecanicosActividadesMap[responsableId]) {
+                    mecanicosActividadesMap[responsableId] = {
+                      id: responsableId,
+                      nombre: mecanicoNamesMap[responsableId],
+                      acciones: []
+                    };
+                  }
+                  
+                  mecanicosActividadesMap[responsableId].acciones.push({
+                    id: doc.id,
+                    type: 'maintenance',
+                    title: `Mantenimiento ${mant.tipo === 'preventivo' ? 'Preventivo' : 'Correctivo'}`,
+                    description: `${mant.equipo} - ${mant.descripcion?.substring(0, 40)}${mant.descripcion?.length > 40 ? '...' : ''}`,
+                    date: mant.fechaActualizacion?.toDate() || new Date(),
+                    estado: mant.estado
+                  });
+                }
+              });
+              
+              // Obtener todas las fallas recientes
+              const allFailuresQuery = query(
+                fallasRef,
+                orderBy('fecha', 'desc'),
+                limit(15)
+              );
+              
+              const allFailuresSnap = await getDocs(allFailuresQuery);
+              
+              // Procesar cada falla y asignarla al mecánico responsable
+              allFailuresSnap.docs.forEach(doc => {
+                const falla = doc.data();
+                const responsableId = falla.responsable;
+                
+                // Solo incluir si tiene un responsable asignado
+                if (responsableId && mecanicoNamesMap[responsableId]) {
+                  if (!mecanicosActividadesMap[responsableId]) {
+                    mecanicosActividadesMap[responsableId] = {
+                      id: responsableId,
+                      nombre: mecanicoNamesMap[responsableId],
+                      acciones: []
+                    };
+                  }
+                  
+                  mecanicosActividadesMap[responsableId].acciones.push({
+                    id: doc.id,
+                    type: 'failure',
+                    title: `Falla Reportada`,
+                    description: `${falla.equipo} - ${falla.descripcion?.substring(0, 40)}${falla.descripcion?.length > 40 ? '...' : ''}`,
+                    date: falla.fecha?.toDate() || new Date(),
+                    estado: falla.estado
+                  });
+                }
+              });
+              
+              // Convertir el mapa a un array y ordenar las actividades por fecha
+              const accionesMecanicos = Object.values(mecanicosActividadesMap).map(mecanico => {
+                // Ordenar las acciones por fecha (más reciente primero)
+                mecanico.acciones.sort((a, b) => b.date - a.date);
+                
+                // Limitar a 3 acciones por mecánico para la visualización
+                mecanico.acciones = mecanico.acciones.slice(0, 3);
+                
+                return mecanico;
+              });
+              
+              // Filtrar solo mecánicos que tengan acciones
+              const mecanicosConAcciones = accionesMecanicos.filter(mecanico => 
+                mecanico.acciones && mecanico.acciones.length > 0
+              );
+              
+              // Actualizar el estado con las actividades de los mecánicos
+              setMecanicosAcciones(mecanicosConAcciones);
+              
+            } catch (error) {
+              console.error("Error al cargar actividades de mecánicos:", error);
+            }
+          }
+          
         } catch (error) {
           console.error("Error al cargar mantenciones:", error);
           mantencionesPendientes = 0;
@@ -239,9 +457,32 @@ const Home = ({ userRole, userData, onLogout, onNavigateToTab }) => {
             : 'Fecha no disponible'}
         </Typography>
       </Box>
-      <Typography variant="body2" mt={1}>
-        {activity.description}
-      </Typography>
+      
+      {/* Descripción con correo del responsable */}
+      <Box mt={1}>
+        <Typography variant="body2">
+          {activity.description}
+        </Typography>
+        
+        {userRole === 'admin' && (
+          <Box sx={{ 
+            mt: 1, 
+            display: 'flex', 
+            alignItems: 'center',
+            bgcolor: '#f0f5ff',
+            px: 1,
+            py: 0.5,
+            borderRadius: 1,
+            width: 'fit-content'
+          }}>
+            <PersonIcon fontSize="small" sx={{ mr: 0.5, fontSize: '0.9rem', color: 'text.secondary' }} />
+            <Typography variant="caption" color="text.secondary">
+              {activity.responsableCorreo || 'No asignado'}
+            </Typography>
+          </Box>
+        )}
+      </Box>
+      
       <Box mt={1} display="flex" justifyContent="flex-end">
         <Typography 
           variant="caption" 
@@ -249,6 +490,63 @@ const Home = ({ userRole, userData, onLogout, onNavigateToTab }) => {
             px: 1,
             py: 0.5,
             borderRadius: 1,
+            bgcolor: activity.estado === 'pendiente' 
+              ? '#FFF7E6' 
+              : activity.estado === 'en_proceso'
+                ? '#E6F7FF'
+                : '#F6FFED',
+            color: activity.estado === 'pendiente' 
+              ? '#FA8C16' 
+              : activity.estado === 'en_proceso'
+                ? '#1890FF'
+                : '#52C41A',
+          }}
+        >
+          {activity.estado === 'pendiente' 
+            ? 'Pendiente' 
+            : activity.estado === 'en_proceso' 
+              ? 'En Proceso' 
+              : 'Completado'}
+        </Typography>
+      </Box>
+    </Box>
+  );
+
+  // Mechanic Activity Item component - versión más compacta para la vista del admin
+  const MechanicActivityItem = ({ activity }) => (
+    <Box 
+      sx={{
+        p: 1.5, 
+        mb: 1,
+        borderRadius: 1,
+        bgcolor: 'background.paper',
+        border: '1px solid #eee'
+      }}
+    >
+      <Box display="flex" justifyContent="space-between" alignItems="center">
+        <Typography variant="body2" fontWeight="medium">
+          {activity.title}
+        </Typography>
+        <Typography variant="caption" color="textSecondary" fontSize="0.7rem">
+          {activity.date instanceof Date 
+            ? activity.date.toLocaleDateString() 
+            : 'Fecha no disponible'}
+        </Typography>
+      </Box>
+      <Typography variant="caption" mt={0.5} display="block">
+        {activity.description}
+        <Box component="span" sx={{ display: 'block', mt: 0.5, fontStyle: 'italic', fontSize: '0.7rem', color: 'text.secondary' }}>
+          {activity.responsableCorreo || ''}
+        </Box>
+      </Typography>
+      <Box mt={0.5} display="flex" justifyContent="flex-end">
+        <Typography 
+          variant="caption" 
+          sx={{
+            px: 1,
+            py: 0.25,
+            borderRadius: 1,
+            fontSize: '0.65rem',
             bgcolor: activity.estado === 'pendiente' 
               ? '#FFF7E6' 
               : activity.estado === 'en_proceso'
@@ -409,6 +707,37 @@ const Home = ({ userRole, userData, onLogout, onNavigateToTab }) => {
             {recentActivities.map((activity) => (
               <ActivityItem key={activity.id} activity={activity} />
             ))}
+          </Box>
+        )}
+        
+        {/* Actividades Recientes de Mecánicos - Sólo para admin */}
+        {userRole === 'admin' && mecanicosAcciones.length > 0 && (
+          <Box mt={5}>
+            <Typography variant={isMobile ? 'h6' : 'h5'} gutterBottom>
+              Actividades Recientes - Equipo de Mecánicos
+            </Typography>
+            <Grid container spacing={2}>
+              {mecanicosAcciones.map((mecanico) => (
+                <Grid item xs={12} md={6} key={mecanico.id}>
+                  <Card elevation={1} sx={{ mb: 2 }}>
+                    <CardContent sx={{ pt: 2, pb: 2 }}>
+                      <Box display="flex" alignItems="center" mb={1}>
+                        <Avatar sx={{ bgcolor: '#1890FF', width: 32, height: 32, mr: 1 }}>
+                          <PersonIcon fontSize="small" />
+                        </Avatar>
+                        <Typography variant="subtitle1">
+                          {mecanico.nombre}
+                        </Typography>
+                      </Box>
+                      <Divider sx={{ my: 1 }} />
+                      {mecanico.acciones.map((action) => (
+                        <MechanicActivityItem key={action.id} activity={action} />
+                      ))}
+                    </CardContent>
+                  </Card>
+                </Grid>
+              ))}
+            </Grid>
           </Box>
         )}
       </>
